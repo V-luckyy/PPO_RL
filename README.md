@@ -56,15 +56,15 @@ PPO_RL/
 
 | 文件 | 作用 | 与主项目关系 |
 |------|------|--------------|
-| `clauld/bipedal_robot_env.py` | 带 Pygame 渲染的双足环境 | 与 `envs/bipedal_env.py` 功能重叠，API 和动力学不同 |
-| `clauld/ppo_agent.py` | 另一套 PPO 实现 | 与 `models/ppo.py` 功能重叠 |
-| `clauld/train.py` | 该体系的训练入口 | 与根目录 `train.py` 功能重叠 |
-| `clauld/evaluate.py` | 模型评估 | 与根目录 `test.py` 功能重叠 |
-| `clauld/visualize.py` | Pygame 渲染模型效果 | 主项目无对应可视化，可单独保留用于演示 |
+| `claude-version/bipedal_robot_env.py` | 带 Pygame 渲染的双足环境 | 与 `envs/bipedal_env.py` 功能重叠，API 和动力学不同 |
+| `claude-version/ppo_agent.py` | 另一套 PPO 实现 | 与 `models/ppo.py` 功能重叠 |
+| `claude-version/train.py` | 该体系的训练入口 | 与根目录 `train.py` 功能重叠 |
+| `claude-version/evaluate.py` | 模型评估 | 与根目录 `test.py` 功能重叠 |
+| `claude-version/visualize.py` | Pygame 渲染模型效果 | 主项目无对应可视化，可单独保留用于演示 |
 
 ### 不需要/可清理的文件
 
-- **`clauld/` 整个目录**：若以主项目为主，可整体移除或归档；若需要 Pygame 实时渲染，可保留 `bipedal_robot_env.py` 和 `visualize.py` 作为可选扩展。
+- **`claude-version/` 整个目录**：若以主项目为主，可整体移除或归档；若需要 Pygame 实时渲染，可保留 `bipedal_robot_env.py` 和 `visualize.py` 作为可选扩展。
 - **`logs/training_log.txt`**：由 Logger 自动生成，可加入 `.gitignore`，不纳入版本控制。
 
 ---
@@ -103,12 +103,12 @@ train.py
 ## 六、依赖关系
 
 主项目依赖：`gym`, `numpy`, `torch`, `matplotlib`  
-clauld 额外依赖：`stable_baselines3`, `pygame`（用于渲染）
+claude-version 额外依赖：`stable_baselines3`, `pygame`（用于渲染）
 
 ---
 
 ## 七、建议
 
 1. **以主项目为主体**：`train.py` + `models/` + `envs/` + `configs/` + `utils/` 作为核心代码。
-2. **clauld 目录**：若不需要 Pygame 可视化或 stable_baselines3，可删除；否则保留为可选扩展。
+2. **claude-version 目录**：若不需要 Pygame 可视化或 stable_baselines3，可删除；否则保留为可选扩展。
 3. **Logger**：`utils/logger.py` 中 `_get_current_step()` 固定返回 100，建议改为接收真实训练步数，或由 PPO 传入。
