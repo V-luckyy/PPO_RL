@@ -37,8 +37,8 @@ DEFAULT_CONFIG = {
     'total_timesteps': 10000,
     'log_interval': 10,
     'save_interval': 10000,
-    'state_dim': 11,
-    'action_dim': 3,
+    'state_dim': 15,
+    'action_dim': 6,
     'max_torque': 10,
     'max_swing_force': 1.0,
     'reward_weights': {
@@ -48,7 +48,10 @@ DEFAULT_CONFIG = {
         'safety': 1.0
     },
     'max_episode_length': 1000,
-    'initial_state': [0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    'initial_state': [0.0, 0.0, 0.8, 0.0, 
+                      0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 1.0]
 }
 
 
@@ -160,14 +163,14 @@ class PPOApp:
                 pass
         return cfg
 
-    def _run_training(self):
+    def _run_training(self, config):
         """在后台线程中运行训练"""
         try:
             from envs.bipedal_env import BipedalEnv
             from models.ppo import PPO
             from utils.visualization import Visualization
 
-            self.config = self._get_config()
+            self.config = config
             self.env = BipedalEnv(config=self.config)
             self.visualizer = Visualization()
             self.ppo_agent = PPO(self.env, self.config, visualizer=self.visualizer)
@@ -208,7 +211,8 @@ class PPOApp:
         self.btn_stop.config(state=tk.NORMAL)
         self.status_var.set("训练中...")
         self.eval_state_history = None  # 新训练时清除上次评估的状态
-        self.worker_thread = threading.Thread(target=self._run_training, daemon=True)
+        config = self._get_config()
+        self.worker_thread = threading.Thread(target=self._run_training, args=(config,), daemon=True)
         self.worker_thread.start()
         self._schedule_refresh()
 
@@ -280,14 +284,20 @@ class PPOApp:
             return
         steps = np.arange(len(hist))
         arr = np.array(hist)
-        # 状态: q_torso_x, dot_x, q_torso_z, dot_z, theta_hip, dot_hip, theta_knee, dot_knee, F_x, F_z, phi
-        theta_hip = np.degrees(arr[:, 4])
-        theta_knee = np.degrees(arr[:, 6])
+        # 状态：15维，此处我们仅绘制躯干高度以及左右两边的腿角
+        theta_hip_L = np.degrees(arr[:, 4])
+        theta_knee_L = np.degrees(arr[:, 6])
+        theta_hip_R = np.degrees(arr[:, 8])
+        theta_knee_R = np.degrees(arr[:, 10])
         torso_z = arr[:, 2]
-        ax.plot(steps, theta_hip, 'b-', label='Hip (deg)', alpha=0.8)
-        ax.plot(steps, theta_knee, 'm-', label='Knee (deg)', alpha=0.8)
+        
+        ax.plot(steps, theta_hip_L, 'b-', label='Hip L (deg)', alpha=0.8)
+        ax.plot(steps, theta_knee_L, 'g-', label='Knee L (deg)', alpha=0.8)
+        ax.plot(steps, theta_hip_R, 'c--', label='Hip R (deg)', alpha=0.6)
+        ax.plot(steps, theta_knee_R, 'm--', label='Knee R (deg)', alpha=0.6)
+        
         ax_twin = ax.twinx()
-        ax_twin.plot(steps, torso_z, 'c--', label='Torso z (m)', alpha=0.8)
+        ax_twin.plot(steps, torso_z, 'k-', linewidth=2, label='Torso z (m)', alpha=0.8)
         ax.set_xlabel('Steps')
         ax.set_ylabel('Joint angle (deg)', color='b')
         ax_twin.set_ylabel('Torso height (m)', color='c')
@@ -330,16 +340,15 @@ class PPOApp:
         except ValueError:
             steps = 500
 
-        def run_eval():
+        def run_eval(cfg):
             try:
                 from envs.bipedal_env import BipedalEnv
                 from models.ppo import PPO
                 from utils.visualization import Visualization
 
-                config = self._get_config()
-                env = BipedalEnv(config=config)
+                env = BipedalEnv(config=cfg)
                 viz = Visualization()
-                agent = PPO(env, config, visualizer=viz)
+                agent = PPO(env, cfg, visualizer=viz)
                 agent.load(path)
 
                 state = env.reset()
@@ -355,7 +364,7 @@ class PPOApp:
                     state = next_state
                     state_history.append(state.copy())
                     eval_steps += 1
-                    viz.update_reward(eval_steps, total_reward)
+                    viz.update_reward(eval_steps, reward)
 
                 self.visualizer = viz
                 self.eval_state_history = state_history
@@ -364,13 +373,14 @@ class PPOApp:
                 self.root.after(0, lambda: self._eval_done(None, None, str(e)))
 
         def do_eval():
+            cfg = self._get_config()
             # 每次评估前清空上次的评估曲线，避免叠加显示
             from utils.visualization import Visualization
             self.eval_state_history = None
             self.visualizer = Visualization()
             self._refresh_plot()
             self.status_var.set("评估中...")
-            t = threading.Thread(target=run_eval, daemon=True)
+            t = threading.Thread(target=run_eval, args=(cfg,), daemon=True)
             t.start()
 
         do_eval()
@@ -417,40 +427,63 @@ class PPOApp:
     def _show_robot_stick_figure(self, state):
         """绘制 2D 连杆机器人姿态（确保机器人在视图内可见）"""
         state = np.asarray(state, dtype=np.float64)
-        q_torso_x, _, q_torso_z, _, theta_hip, _, theta_knee, _, _, _, _ = state
+        (q_torso_x, _, q_torso_z, _, 
+         theta_hip_L, _, theta_knee_L, _, 
+         theta_hip_R, _, theta_knee_R, _, 
+         _, _, _) = state
+         
         thigh_len, calf_len = 0.4, 0.4
         hip_x, hip_z = float(q_torso_x), float(q_torso_z)
-        knee_x = hip_x - thigh_len * np.sin(theta_hip)
-        knee_z = hip_z + thigh_len * np.cos(theta_hip)
-        ankle_x = knee_x - calf_len * np.sin(theta_hip + theta_knee)
-        ankle_z = knee_z + calf_len * np.cos(theta_hip + theta_knee)
+        
+        # 左腿（L）
+        knee_x_L = hip_x - thigh_len * np.sin(theta_hip_L)
+        knee_z_L = hip_z - thigh_len * np.cos(theta_hip_L)
+        ankle_x_L = knee_x_L - calf_len * np.sin(theta_hip_L + theta_knee_L)
+        ankle_z_L = knee_z_L - calf_len * np.cos(theta_hip_L + theta_knee_L)
+        
+        # 右腿（R）
+        knee_x_R = hip_x - thigh_len * np.sin(theta_hip_R)
+        knee_z_R = hip_z - thigh_len * np.cos(theta_hip_R)
+        ankle_x_R = knee_x_R - calf_len * np.sin(theta_hip_R + theta_knee_R)
+        ankle_z_R = knee_z_R - calf_len * np.cos(theta_hip_R + theta_knee_R)
+
         torso_top_z = hip_z + 0.3
 
         win = tk.Toplevel(self.root)
-        win.title("机器人姿态")
-        fig = Figure(figsize=(5, 5), dpi=100)
+        win.title("双足机器人姿态")
+        fig = Figure(figsize=(6, 5), dpi=100)
         ax = fig.add_subplot(111)
-        # 先设范围再画，保证机器人一定在视野内
+        
         margin = 0.15
-        x_min = min(hip_x, knee_x, ankle_x) - margin
-        x_max = max(hip_x, knee_x, ankle_x) + margin
-        z_min = max(0, min(hip_z, knee_z, ankle_z) - margin)
-        z_max = max(torso_top_z, hip_z, knee_z, ankle_z) + margin
+        x_min = min(hip_x, knee_x_L, ankle_x_L, knee_x_R, ankle_x_R) - margin
+        x_max = max(hip_x, knee_x_L, ankle_x_L, knee_x_R, ankle_x_R) + margin
+        z_min = max(0, min(hip_z, knee_z_L, ankle_z_L, knee_z_R, ankle_z_R) - margin)
+        z_max = max(torso_top_z, hip_z, knee_z_L, knee_z_R) + margin
         ax.set_xlim(x_min, x_max)
         ax.set_ylim(z_min, z_max)
         ax.set_aspect('equal')
-        # 躯干、大腿、小腿
-        ax.plot([hip_x, hip_x], [hip_z, torso_top_z], 'k-', linewidth=4, label='Torso')
-        ax.plot([hip_x, knee_x], [hip_z, knee_z], 'b-', linewidth=3, label='Thigh')
-        ax.plot([knee_x, ankle_x], [knee_z, ankle_z], 'g-', linewidth=3, label='Calf')
+        
+        # 躯干 (黑)
+        ax.plot([hip_x, hip_x], [hip_z, torso_top_z], 'k-', linewidth=5, label='Torso')
         ax.plot(hip_x, torso_top_z, 'ko', markersize=10)
-        ax.plot(hip_x, hip_z, 'bo', markersize=8)
-        ax.plot(knee_x, knee_z, 'go', markersize=8)
-        ax.plot(ankle_x, ankle_z, 'ro', markersize=6)
+        ax.plot(hip_x, hip_z, 'ko', markersize=10)
+        
+        # 右腿 (R) 浅色画在后面
+        ax.plot([hip_x, knee_x_R], [hip_z, knee_z_R], color='#add8e6', linestyle='-', linewidth=4, label='Thigh R')
+        ax.plot([knee_x_R, ankle_x_R], [knee_z_R, ankle_z_R], color='#90ee90', linestyle='-', linewidth=4, label='Calf R')
+        ax.plot(knee_x_R, knee_z_R, color='#90ee90', marker='o', markersize=8)
+        ax.plot(ankle_x_R, ankle_z_R, color='salmon', marker='o', markersize=6)
+        
+        # 左腿 (L) 深色画在前面
+        ax.plot([hip_x, knee_x_L], [hip_z, knee_z_L], color='blue', linestyle='-', linewidth=4, label='Thigh L')
+        ax.plot([knee_x_L, ankle_x_L], [knee_z_L, ankle_z_L], color='green', linestyle='-', linewidth=4, label='Calf L')
+        ax.plot(knee_x_L, knee_z_L, 'go', markersize=8)
+        ax.plot(ankle_x_L, ankle_z_L, 'ro', markersize=6)
+        
         ax.axhline(0, color='gray', linestyle='--', alpha=0.5)
         ax.set_xlabel('x (m)')
         ax.set_ylabel('z (m)')
-        ax.set_title('姿态: theta_hip={:.1f} deg  theta_knee={:.1f} deg'.format(float(np.degrees(theta_hip)), float(np.degrees(theta_knee))))
+        ax.set_title(f"姿态: L(hip {np.degrees(theta_hip_L):.1f}°, knee {np.degrees(theta_knee_L):.1f}°) | R(hip {np.degrees(theta_hip_R):.1f}°, knee {np.degrees(theta_knee_R):.1f}°)")
         ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), fontsize=8)
         ax.grid(True, alpha=0.3)
         from matplotlib.ticker import MaxNLocator

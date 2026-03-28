@@ -39,7 +39,7 @@ class PPO:
         # 防止 NaN 传入分布
         action_mu = torch.clamp(action_mu, -50.0, 50.0)
         action_sigma = torch.clamp(action_sigma, 1e-4, 10.0)
-        dist = torch.distributions.Normal(action_mu, action_sigma)  # 使用正态分布生成连续动作
+        dist = torch.distributions.Normal(action_mu, action_sigma)  # 使用正态分布生成连续动作空间
         action = dist.sample()  # 从分布中采样动作
 
         # 返回连续动作及其log概率
@@ -60,9 +60,12 @@ class PPO:
             state, action, reward, next_state, done, log_prob = trajectory[t]
             state_value = self.actor_critic.value_net(torch.tensor(state, dtype=torch.float32))
             next_state_value = self.actor_critic.value_net(torch.tensor(next_state, dtype=torch.float32))
+            # TD error
             delta = reward + gamma * next_state_value * (1 - done) - state_value
+            # 计算一步GAE优势：平衡蒙特卡罗优势(准确方差大)和TD优势(误差大方差小计算快)
             advantage = delta + gamma * lambd * (1 - done) * (advantages[0] if advantages else 0)
             advantages.insert(0, advantage)
+            # GAE下的TD目标值
             target_values.insert(0, advantage + state_value)
 
         return advantages, target_values
@@ -104,13 +107,15 @@ class PPO:
             # 连续动作：对 action 维度求和得到每个 step 的 log_prob
             log_prob_per_step = log_probs.sum(dim=1)
             old_log_prob_per_step = old_log_probs.sum(dim=1)
-
+            # 通过调整策略比来增大优势高动作的概率，降低优势低动作的概率
             ratio = torch.exp(log_prob_per_step - old_log_prob_per_step)
             surr1 = ratio * advantages
             surr2 = torch.clamp(ratio, 1.0 - self.config['epsilon'], 1.0 + self.config['epsilon']) * advantages
+            # 裁剪策略比限制策略损失从而限制策略更新步长
             policy_loss = -torch.min(surr1, surr2).mean()
-
+            # TD误差
             value_loss = F.mse_loss(state_values.squeeze(-1), target_values)
+            # 熵正则化
             entropy_loss = -dist.entropy().mean()
             loss = policy_loss + 0.5 * value_loss + 0.01 * entropy_loss
 
@@ -119,10 +124,10 @@ class PPO:
             torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), max_norm=0.5)
             self.optimizer.step()
 
-        # 记录损失和奖励（使用 policy_loss 作为曲线，与 reward 趋势更符合“loss 降 reward 升”）
+        # 记录损失和奖励（改用 policy_loss，避免 value_loss 被庞大的 reward 平方项统治）
         episode_reward = sum(t[2] for t in trajectory)
         policy_loss_val = policy_loss.item()
-        self.last_loss = loss.item()
+        self.last_loss = policy_loss_val
         self.logger.log_loss(self.last_loss, timestep)
         self._has_updated = True
         # 曲线数据仅在 train() 中每 50 步统一写入
@@ -131,16 +136,22 @@ class PPO:
         """
         训练PPO模型。训练曲线仅在此处、每 plot_interval 步统一写入一次，避免重复/归零。
         """
+        # 定义起始状态
         state = self.env.reset()
+        # 初始化轨迹
         trajectory = []
+        # 初始化训练步数
         timestep = 0
+        # 定义绘图间隔
         plot_interval = self.config.get('plot_interval', 50)
-        current_ep_reward = 0.0  # 当前 episode 累计奖励
-
+        # 当前 episode 累计奖励
+        current_ep_reward = 0.0  
+        self.last_ep_reward = 0.0
+        # 训练循环
         while timestep < total_timesteps:
             if stop_callback and stop_callback():
                 break
-
+            # 选择动作，返回动作和动作的log概率
             action, log_prob = self.select_action(state)
             action_np = action.detach().cpu().numpy()
             next_state, reward, done, _ = self.env.step(action_np)
@@ -154,15 +165,13 @@ class PPO:
 
             if episode_ends_now:
                 self.update(trajectory, timestep)
-                if self.visualizer and self._has_updated and timestep % plot_interval == 0:
-                    ep_rew = sum(t[2] for t in trajectory)
-                    self.visualizer.update_episode(timestep, self.last_loss, ep_rew)
+                self.last_ep_reward = sum(t[2] for t in trajectory)
+                # 只有在这整个 Episode 确实死掉/结算了，才向数组压入唯独这1个真实数据点（彻底消灭阶梯波）
+                if self.visualizer and self._has_updated:
+                    self.visualizer.update_episode(timestep, self.last_loss, self.last_ep_reward)
                 current_ep_reward = 0.0
                 trajectory = []
                 state = self.env.reset()
-            else:
-                if self.visualizer and self._has_updated and timestep % plot_interval == 0:
-                    self.visualizer.update_episode(timestep, self.last_loss, current_ep_reward)
 
             if timestep % self.config['log_interval'] == 0:
                 self.logger.print_logs(timestep)

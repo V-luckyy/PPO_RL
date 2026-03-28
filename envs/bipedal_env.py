@@ -15,9 +15,11 @@ class BipedalEnv(gym.Env):
         self.action_dim = self.config['action_dim']
 
         # 定义动作空间和观察空间（显式 float32 避免 Box bound precision 警告）
-        low = np.array([-self.config['max_torque'], -self.config['max_torque'], 0.0], dtype=np.float32)
-        high = np.array([self.config['max_torque'], self.config['max_torque'],
-                        self.config['max_swing_force']], dtype=np.float32)
+        # 6维：[tau_hip_L, tau_knee_L, f_swing_L, tau_hip_R, tau_knee_R, f_swing_R]
+        low = np.array([-self.config['max_torque'], -self.config['max_torque'], 0.0,
+                        -self.config['max_torque'], -self.config['max_torque'], 0.0], dtype=np.float32)
+        high = np.array([self.config['max_torque'], self.config['max_torque'], self.config['max_swing_force'],
+                         self.config['max_torque'], self.config['max_torque'], self.config['max_swing_force']], dtype=np.float32)
         self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
         low_obs = np.float32(-np.inf)
@@ -35,14 +37,13 @@ class BipedalEnv(gym.Env):
         return self.state
 
     def step(self, action):
-        """执行一步操作，并返回新的状态、奖励、是否完成和额外信息"""
-        # 解构动作
-        tau_hip, tau_knee, f_swing = action  # 确保这里的action是一个包含三个值的可迭代对象
+        # 解构动作 (分为左右腿)
+        tau_hip_L, tau_knee_L, f_swing_L, tau_hip_R, tau_knee_R, f_swing_R = action
 
         # 其余的环境更新逻辑...
-        next_state = self._update_state(tau_hip, tau_knee, f_swing)
+        next_state = self._update_state(tau_hip_L, tau_knee_L, f_swing_L, tau_hip_R, tau_knee_R, f_swing_R)
 
-        reward = self._compute_reward(next_state, tau_hip, tau_knee)
+        reward = self._compute_reward(next_state, tau_hip_L, tau_knee_L, tau_hip_R, tau_knee_R)
 
         self.state = next_state
         self.timestep += 1
@@ -50,79 +51,136 @@ class BipedalEnv(gym.Env):
 
         return next_state, reward, done, {}
 
-    def _update_state(self, tau_hip, tau_knee, f_swing):
+    def _update_state(self, tau_hip_L, tau_knee_L, f_swing_L, tau_hip_R, tau_knee_R, f_swing_R):
         """
-        基于动作（关节力矩、摆动腿推力）更新状态
-        这个方法应该根据你提供的动力学方程来更新状态。
-        目前是简化形式。
+        基于左右腿动作更新15维完整双足状态
         """
-        # 在此示例中，状态更新是一个简单的加权累加，实际情况需要根据动力学公式推导
-        q_torso_x, dot_q_torso_x, q_torso_z, dot_q_torso_z, theta_hip, dot_theta_hip, theta_knee, dot_theta_knee, F_foot_x, F_foot_z, phi_foot = self.state
+        # 解构所有15维状态
+        (q_torso_x, dot_q_torso_x, q_torso_z, dot_q_torso_z,
+         theta_hip_L, dot_theta_hip_L, theta_knee_L, dot_theta_knee_L,
+         theta_hip_R, dot_theta_hip_R, theta_knee_R, dot_theta_knee_R,
+         F_foot_z_L, F_foot_z_R, phi_foot) = self.state
 
-        # 假设机器人简单地更新这些状态
         next_state = np.copy(self.state)
-        next_state[0] += dot_q_torso_x * 0.02  # 假设躯干x位置根据速度更新
-        next_state[2] += dot_q_torso_z * 0.02  # 假设躯干z位置根据速度更新
-        next_state[4] += dot_theta_hip * 0.02  # 假设髋关节角度根据速度更新
-        next_state[6] += dot_theta_knee * 0.02  # 假设膝关节角度根据速度更新
+        dt = 0.02
+        damping = 0.90
+        g = 9.81
+        
+        # --- 1. 左腿关节更新 ---
+        next_state[5] = next_state[5] * damping + (tau_hip_L * 0.1 * dt)
+        next_state[7] = next_state[7] * damping + (tau_knee_L * 0.1 * dt)
+        next_state[4] += next_state[5] * dt
+        next_state[6] += next_state[7] * dt
 
-        # 简化动力学模型：关节力矩影响角速度，外部力影响接触力
-        next_state[1] += (tau_hip * 0.01)  # 更新髋关节速度
-        next_state[3] += (tau_knee * 0.01)  # 更新膝关节速度
-        next_state[9] += f_swing  # 摆动腿的推力影响足端接触力
+        # --- 2. 右腿关节更新 ---
+        next_state[9] = next_state[9] * damping + (tau_hip_R * 0.1 * dt)
+        next_state[11] = next_state[11] * damping + (tau_knee_R * 0.1 * dt)
+        next_state[8] += next_state[9] * dt
+        next_state[10] += next_state[11] * dt
 
-        # 限制状态范围，防止发散导致评估曲线异常（如 torso_z 涨到 7）
-        next_state[1] = np.clip(next_state[1], -5.0, 5.0)   # dot_q_torso_x
-        next_state[3] = np.clip(next_state[3], -5.0, 5.0)   # dot_q_torso_z
-        next_state[2] = np.clip(next_state[2], 0.3, 2.0)    # q_torso_z 躯干高度
-        next_state[4] = np.clip(next_state[4], -np.pi, np.pi)   # theta_hip
-        next_state[6] = np.clip(next_state[6], -np.pi, np.pi)   # theta_knee
-        next_state[5] = np.clip(next_state[5], -5.0, 5.0)   # dot_theta_hip
-        next_state[7] = np.clip(next_state[7], -5.0, 5.0)   # dot_theta_knee
-        next_state[9] = np.clip(next_state[9], 0.0, 20.0)   # F_foot_z
-        next_state[10] = 1.0 if next_state[10] > 0.5 else 0.0  # phi_foot 离散化
+        # --- 3. 计算双脚落点高度与推力支持 ---
+        # 左腿坐标
+        leg_z_L = 0.4 * math.cos(next_state[4]) + 0.4 * math.cos(next_state[4] + next_state[6])
+        ankle_height_L = next_state[2] - leg_z_L 
+        
+        # 右腿坐标
+        leg_z_R = 0.4 * math.cos(next_state[8]) + 0.4 * math.cos(next_state[8] + next_state[10])
+        ankle_height_R = next_state[2] - leg_z_R 
+        
+        force_z = -g
+        force_x = 0.0
+        
+        next_state[12] = 0.0  # L foot force
+        next_state[13] = 0.0  # R foot force
+
+        # 左腿判定与发力
+        if ankle_height_L < 0.05:
+            total_angle_L = next_state[4] + next_state[6] * 0.5 
+            base_support_z_L = g * 0.45  # 分担一半重力
+            scaled_f_swing_L = f_swing_L * 15.0 
+            Fz_L = base_support_z_L + scaled_f_swing_L * math.cos(total_angle_L)
+            Fx_L = scaled_f_swing_L * math.sin(total_angle_L)
+            force_z += Fz_L
+            force_x += Fx_L
+            next_state[12] = Fz_L
+            
+        # 右腿判定与发力
+        if ankle_height_R < 0.05:
+            total_angle_R = next_state[8] + next_state[10] * 0.5 
+            base_support_z_R = g * 0.45  # 分担一半重力
+            scaled_f_swing_R = f_swing_R * 15.0 
+            Fz_R = base_support_z_R + scaled_f_swing_R * math.cos(total_angle_R)
+            Fx_R = scaled_f_swing_R * math.sin(total_angle_R)
+            force_z += Fz_R
+            force_x += Fx_R
+            next_state[13] = Fz_R
+
+        # --- 4. 躯干全向动力学更新 ---
+        next_state[1] = next_state[1] * damping + force_x * dt  # dot_q_torso_x
+        next_state[3] = next_state[3] * damping + force_z * dt  # dot_q_torso_z
+        next_state[0] += next_state[1] * dt  # torso_x
+        next_state[2] += next_state[3] * dt  # torso_z
+
+        # 限制状态范围防爆炸
+        next_state[1] = np.clip(next_state[1], -5.0, 5.0)
+        next_state[3] = np.clip(next_state[3], -5.0, 5.0)
+        next_state[2] = np.clip(next_state[2], 0.3, 2.0)
+        
+        # 截断所有关节
+        for i in [4, 6, 8, 10]:
+            next_state[i] = np.clip(next_state[i], -np.pi, np.pi)
+        for i in [5, 7, 9, 11]:
+            next_state[i] = np.clip(next_state[i], -5.0, 5.0)
+
+        # 稍微更新一下交替步态相位作为网络观察量（基于步数余弦）
+        next_state[14] = math.cos(2 * math.pi * self.timestep / 40.0)
 
         return next_state
 
-    def _compute_reward(self, state, tau_hip, tau_knee):
+    def _compute_reward(self, state, tau_hip_L, tau_knee_L, tau_hip_R, tau_knee_R):
         """
-        根据给定的状态计算奖励。
-        包括平衡奖励、能量效率、步态周期性、安全奖励等。
+        评估完整双足状态并计算奖励
         """
-        q_torso_x, dot_q_torso_x, q_torso_z, dot_q_torso_z, theta_hip, dot_theta_hip, theta_knee, dot_theta_knee, F_foot_x, F_foot_z, phi_foot = state
+        (q_torso_x, dot_q_torso_x, q_torso_z, dot_q_torso_z,
+         theta_hip_L, dot_theta_hip_L, theta_knee_L, dot_theta_knee_L,
+         theta_hip_R, dot_theta_hip_R, theta_knee_R, dot_theta_knee_R,
+         F_foot_z_L, F_foot_z_R, phi_foot) = state
 
-        # 平衡奖励
-        r_balance = math.exp(-2.0 * abs(q_torso_x)) + math.exp(-1.0 * abs(q_torso_z - 0.8))
+        # 平衡与前移奖励
+        r_balance = math.exp(-1.0 * abs(q_torso_z - 0.8))
+        r_forward = dot_q_torso_x * 0.5  # 鼓励向前走
 
-        # 能量效率奖励（假设关节力矩平方作为消耗）
-        r_energy = -0.005 * (tau_hip ** 2 + tau_knee ** 2)
+        # 能量效率
+        r_energy = -0.002 * (tau_hip_L**2 + tau_knee_L**2 + tau_hip_R**2 + tau_knee_R**2)
 
-        # 步态奖励（基于接触相位，周期性控制）
-        T_stride = 1.0  # 假设步态周期为1秒
-        r_gait = math.cos(2 * math.pi * self.timestep / T_stride) * (1 if phi_foot == 1 else 0)
+        # 步态分离奖励（强烈惩罚双腿像僵尸一样贴在一起）
+        angle_diff = abs(theta_hip_L - theta_hip_R)
+        r_gait = 0.5 * angle_diff  # 两腿劈开越远奖励越大
 
-        # 安全奖励（确保足端力不超过最大值，并限制关节角度）
-        r_safety = -0.1 * max(0, F_foot_z - 10.0) - 0.2 * max(0, theta_knee - 2.0)
+        # 安全惩罚
+        r_safety = -0.1 * max(0, F_foot_z_L - 10.0) - 0.1 * max(0, F_foot_z_R - 10.0)
 
-        # 总奖励 = 各项奖励的加权和
-        reward = (1.0 * r_balance + 0.005 * r_energy + 1.0 * r_gait + 1.0 * r_safety)
-
+        # 总奖励
+        reward = (1.5 * r_balance + r_forward + r_energy + r_gait + r_safety)
         return reward
 
     def _check_done(self):
         """检查终止条件"""
-        q_torso_x, dot_q_torso_x, q_torso_z, dot_q_torso_z, theta_hip, dot_theta_hip, theta_knee, dot_theta_knee, F_foot_x, F_foot_z, phi_foot = self.state
+        q_torso_z = self.state[2]
+        F_foot_z_L = self.state[12]
+        F_foot_z_R = self.state[13]
 
-        # 躯干倾斜角度过大
-        if abs(q_torso_x) > 15.0:
+        # 质心高度过低判定跌倒
+        if q_torso_z < 0.35:
             return True
 
-        # 质心高度过低
-        if q_torso_z < 0.3:
+
+        # 躯干前进跑得太远或者落后太远判定失败（可选）
+        if self.state[0] < -2.0 or self.state[0] > 100.0:
             return True
 
-        # 连续10步未触发摆动腿动作
-        if self.timestep > 10 and phi_foot == 0:
+        # 脚部长时间悬空判定为摔倒
+        if self.timestep > 20 and F_foot_z_L < 0.1 and F_foot_z_R < 0.1:
             return True
 
         return False

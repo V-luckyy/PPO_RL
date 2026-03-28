@@ -32,13 +32,15 @@ class Visualization:
     def update_episode(self, step, loss, reward):
         """
         同时更新损失和奖励（每个 episode 结束时调用一次）
-        :param step: 当前训练步数
-        :param loss: 当前损失值
-        :param reward: 当前 episode 累计奖励
+        检查如果 step 相同，更新内容而不是追加重复点（解决阶梯画法）
         """
-        self.steps.append(step)
-        self.losses.append(loss)
-        self.rewards.append(reward)
+        if self.steps and self.steps[-1] == step:
+            self.losses[-1] = loss
+            self.rewards[-1] = reward
+        else:
+            self.steps.append(step)
+            self.losses.append(loss)
+            self.rewards.append(reward)
 
     def plot_loss(self):
         """
